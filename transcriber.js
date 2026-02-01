@@ -5,16 +5,35 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const yaml = require('js-yaml');
+const Groq = require('groq-sdk');
+const config = require('./config');
 
 class Transcriber {
   constructor(io, transcriptsDir) {
     this.io = io;
-    this.peers = new Map(); // socketId -> { pc, audioSink, buffer, userId, roomId }
-    this.sessions = new Map(); // roomId -> { filePath, startedAt, transcriptions }
+    this.peers = new Map();
+    this.sessions = new Map();
     this.tmpDir = path.join(os.tmpdir(), 'whisper-audio');
-    this.transcriptsDir = transcriptsDir || path.join(process.cwd(), 'transcripts');
+    this.transcriptsDir = transcriptsDir || path.resolve(config.transcripts.directory);
     this.isProcessing = false;
     this.queue = [];
+    this.provider = config.transcription.provider;
+    this.bufferDuration = config.transcription.bufferDuration;
+
+    // Initialize Groq client if needed
+    if (this.provider === 'groq') {
+      if (config.transcription.groq.apiKey) {
+        this.groq = new Groq({ apiKey: config.transcription.groq.apiKey });
+        console.log('[Transcriber] Using Groq for transcription');
+      } else {
+        console.warn('[Transcriber] GROQ_API_KEY not set, falling back to local-whisper');
+        this.provider = 'local-whisper';
+      }
+    }
+
+    if (this.provider === 'local-whisper') {
+      console.log('[Transcriber] Using local Whisper for transcription');
+    }
 
     // Ensure directories exist
     if (!fs.existsSync(this.tmpDir)) {
@@ -25,7 +44,6 @@ class Transcriber {
     }
   }
 
-  // Start a new session for a room
   startSession(roomId) {
     if (this.sessions.has(roomId)) {
       return this.sessions.get(roomId);
@@ -42,7 +60,6 @@ class Transcriber {
       transcriptions: []
     };
 
-    // Write initial session file
     const sessionData = {
       room: roomId,
       startedAt: startedAt.toISOString(),
@@ -56,11 +73,9 @@ class Transcriber {
     return session;
   }
 
-  // End a session when room becomes empty
   endSession(roomId) {
     const session = this.sessions.get(roomId);
     if (session) {
-      // Update file with end time
       const sessionData = {
         room: roomId,
         startedAt: session.startedAt.toISOString(),
@@ -73,7 +88,6 @@ class Transcriber {
     }
   }
 
-  // Save transcription to session file
   saveTranscription(roomId, userId, text, timestamp) {
     const session = this.sessions.get(roomId);
     if (!session) return;
@@ -86,7 +100,6 @@ class Transcriber {
 
     session.transcriptions.push(entry);
 
-    // Update YAML file
     const sessionData = {
       room: roomId,
       startedAt: session.startedAt.toISOString(),
@@ -95,7 +108,6 @@ class Transcriber {
     fs.writeFileSync(session.filePath, yaml.dump(sessionData));
   }
 
-  // Check if room has any connected peers
   roomHasPeers(roomId) {
     for (const [, peerData] of this.peers) {
       if (peerData.roomId === roomId) return true;
@@ -103,9 +115,7 @@ class Transcriber {
     return false;
   }
 
-  // Create a peer connection for a user in a room
   async createPeer(socketId, roomId, userId) {
-    // Start session if this is first peer in room
     if (!this.roomHasPeers(roomId)) {
       this.startSession(roomId);
     }
@@ -159,7 +169,7 @@ class Transcriber {
       peerData.sampleRate = data.sampleRate;
       peerData.channelCount = data.channelCount;
 
-      if (peerData.bufferDuration >= 10) {
+      if (peerData.bufferDuration >= this.bufferDuration) {
         this.queueTranscription(socketId, peerData);
       }
     };
@@ -171,6 +181,11 @@ class Transcriber {
     const audioBuffer = Buffer.concat(peerData.buffer);
     peerData.buffer = [];
     peerData.bufferDuration = 0;
+
+    // Skip silent chunks early (before queuing)
+    if (!this.hasVoiceActivity(audioBuffer)) {
+      return;
+    }
 
     if (this.queue.length >= 3) {
       console.log('[Transcriber] Queue full, dropping oldest chunk');
@@ -199,17 +214,21 @@ class Transcriber {
     this.writeWav(wavPath, item.audioBuffer, item.sampleRate, item.channelCount);
 
     try {
-      const transcript = await this.runWhisper(wavPath);
+      let transcript;
+      if (this.provider === 'groq') {
+        transcript = await this.transcribeWithGroq(wavPath);
+      } else {
+        transcript = await this.transcribeWithLocalWhisper(wavPath);
+      }
+
       if (transcript && transcript.trim()) {
         const text = transcript.trim();
         const timestamp = Date.now();
 
         console.log(`[Transcriber] ${item.userId}: ${text}`);
 
-        // Save to YAML file
         this.saveTranscription(item.roomId, item.userId, text, timestamp);
 
-        // Emit transcription to room
         this.io.to(item.roomId).emit('transcription', {
           userId: item.userId,
           text,
@@ -217,7 +236,7 @@ class Transcriber {
         });
       }
     } catch (err) {
-      console.error('[Transcriber] Whisper error:', err.message);
+      console.error('[Transcriber] Transcription error:', err.message);
     } finally {
       fs.unlink(wavPath, () => {});
       this.isProcessing = false;
@@ -250,14 +269,64 @@ class Transcriber {
     fs.writeFileSync(filePath, Buffer.concat([header, pcmBuffer]));
   }
 
-  runWhisper(audioPath) {
+  // Check if audio has enough energy (simple VAD)
+  hasVoiceActivity(pcmBuffer) {
+    const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.length / 2);
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) {
+      sum += Math.abs(samples[i]);
+    }
+    const avgEnergy = sum / samples.length;
+    console.log(`[Transcriber] Audio energy: ${avgEnergy.toFixed(0)}`);
+    // Threshold for voice activity (lowered from 500)
+    return avgEnergy > 50;
+  }
+
+  async transcribeWithGroq(audioPath) {
+    const audioBuffer = fs.readFileSync(audioPath);
+
+    // Skip if no voice activity detected
+    if (!this.hasVoiceActivity(audioBuffer)) {
+      console.log('[Transcriber] Skipping silent chunk');
+      return '';
+    }
+
+    const file = new File([audioBuffer], 'audio.wav', { type: 'audio/wav' });
+
+    const transcription = await this.groq.audio.transcriptions.create({
+      file,
+      model: config.transcription.groq.model,
+      language: config.transcription.groq.language,
+      response_format: 'text',
+      prompt: 'This is a conversation. Transcribe only actual speech, not filler words.'
+    });
+
+    // Filter out common Whisper hallucinations
+    const hallucinations = [
+      'thank you', 'thanks for watching', 'thanks for listening',
+      'subscribe', 'like and subscribe', 'see you next time',
+      'bye', 'goodbye', 'the end'
+    ];
+
+    const text = transcription.trim().toLowerCase();
+    if (hallucinations.some(h => text === h || text === h + '.')) {
+      console.log('[Transcriber] Filtered hallucination:', transcription);
+      return '';
+    }
+
+    return transcription;
+  }
+
+  transcribeWithLocalWhisper(audioPath) {
     return new Promise((resolve, reject) => {
+      const { model, language } = config.transcription.localWhisper;
+
       const whisper = spawn('whisper', [
         audioPath,
-        '--model', 'tiny',
+        '--model', model,
         '--output_format', 'txt',
         '--output_dir', this.tmpDir,
-        '--language', 'en',
+        '--language', language,
         '--task', 'transcribe'
       ]);
 
@@ -319,7 +388,6 @@ class Transcriber {
       this.peers.delete(socketId);
       console.log(`[Transcriber] Removed peer ${socketId}`);
 
-      // End session if room is now empty
       if (!this.roomHasPeers(roomId)) {
         this.endSession(roomId);
       }

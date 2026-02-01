@@ -27,6 +27,7 @@
   "dependencies": {
     "@roamhq/wrtc": "^0.9.1",
     "express": "^4.19.2",
+    "groq-sdk": "^0.37.0",
     "js-yaml": "^4.1.1",
     "socket.io": "^4.8.0"
   },
