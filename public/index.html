@@ -11,6 +11,10 @@
     button:hover { background: #0056b3; }
     button.secondary { background: #6c757d; }
     button.secondary:hover { background: #545b62; }
+    button.mute { background: #28a745; }
+    button.mute:hover { background: #218838; }
+    button.mute.muted { background: #dc3545; }
+    button.mute.muted:hover { background: #c82333; }
     #status { margin: 20px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; }
     audio { width: 100%; }
     .room-list { list-style: none; padding: 0; }
@@ -45,6 +49,9 @@
     <button class="secondary back-btn" onclick="leaveRoom()">Back to Lobby</button>
     <h2 id="roomTitle">Room</h2>
     <div id="status">Initializing...</div>
+    <div style="margin: 15px 0;">
+      <button id="muteBtn" class="mute" onclick="toggleMute()">Mic On</button>
+    </div>
     <audio id="remoteAudio" autoplay playsinline controls></audio>
     <div style="margin-top: 15px;">
       <input type="text" id="ttsText" placeholder="Enter text to speak (TTS mixes with mic)" />
@@ -62,6 +69,7 @@
     let audioContext;
     let micSource;
     let destination;
+    let isMuted = false;
 
     // Initialize socket connection
     socket = io({ transports: ['websocket'] });
@@ -140,6 +148,9 @@
       }
 
       currentRoomId = null;
+      isMuted = false;
+      document.getElementById('muteBtn').textContent = 'Mic On';
+      document.getElementById('muteBtn').classList.remove('muted');
       document.getElementById('room').classList.remove('active');
       document.getElementById('lobby').classList.add('active');
       document.getElementById('remoteAudio').srcObject = null;
@@ -303,6 +314,28 @@
       } catch (err) {
         console.error('TTS error:', err);
         statusEl.textContent = `TTS error: ${err.message}`;
+      }
+    }
+
+    // Toggle mute/unmute
+    function toggleMute() {
+      isMuted = !isMuted;
+      const muteBtn = document.getElementById('muteBtn');
+
+      // Mute/unmute the local audio tracks
+      if (localStream) {
+        localStream.getAudioTracks().forEach(track => {
+          track.enabled = !isMuted;
+        });
+      }
+
+      // Update button appearance
+      if (isMuted) {
+        muteBtn.textContent = 'Mic Off';
+        muteBtn.classList.add('muted');
+      } else {
+        muteBtn.textContent = 'Mic On';
+        muteBtn.classList.remove('muted');
       }
     }
 
