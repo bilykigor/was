@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Duplex Audio Streamer</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 400px; margin: 50px auto; padding: 20px; }
+    input { width: 70%; padding: 10px; }
+    button { padding: 10px 20px; background: #007bff; color: white; border: none; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    #status { margin: 20px 0; padding: 10px; background: #f8f9fa; border-radius: 5px; }
+    audio { width: 100%; }
+  </style>
+</head>
+<body>
+  <h1>🔊 WebRTC Audio Streamer</h1>
+  <p>Open on laptop (Chrome) and phone (Safari) simultaneously for duplex audio.</p>
+  <div id="status">Initializing...</div>
+  <audio id="remoteAudio" autoplay playsinline controls></audio>
+  <div>
+    <input type="text" id="ttsText" placeholder="Enter text to speak (TTS mixes with mic)" />
+    <button onclick="speak()">Speak (TTS)</button>
+  </div>
+  <p><small>Mic: Auto-enabled. TTS uses Google Translate TTS (demo).</small></p>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    (async () => {
+      const roomId = 'default';
+      const statusEl = document.getElementById('status');
+      const remoteAudio = document.getElementById('remoteAudio');
+      let pc;
+      let localStream;
+      let audioContext;
+      let micSource;
+      let destination;
+
+      statusEl.textContent = 'Requesting microphone access...';
+      let hasMic = false;
+
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: {
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true }
+        } });
+        hasMic = true;
+        statusEl.textContent = 'Mic acquired. Creating WebRTC peer...';
+      } catch (err) {
+        // Fallback to basic audio request
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          hasMic = true;
+          statusEl.textContent = 'Mic acquired (basic). Creating WebRTC peer...';
+        } catch (err2) {
+          statusEl.textContent = 'No mic available. TTS-only mode.';
+        }
+      }
+
+      audioContext = new AudioContext();
+      destination = audioContext.createMediaStreamDestination();
+
+      if (hasMic && localStream) {
+        micSource = audioContext.createMediaStreamSource(localStream);
+        micSource.connect(destination);
+      } else {
+        // Create silent audio track for WebRTC (TTS will still work)
+        const oscillator = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+        gain.gain.value = 0; // Silent
+        oscillator.connect(gain);
+        gain.connect(destination);
+        oscillator.start();
+      }
+
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      pc.addEventListener('track', (event) => {
+        remoteAudio.srcObject = event.streams[0];
+        // Ensure audio plays (autoplay policy)
+        remoteAudio.play().catch(e => console.log('Autoplay blocked, click page to hear audio'));
+        statusEl.textContent = 'Connected! Speaking... (remote audio playing)';
+      });
+
+      pc.addEventListener('connectionstatechange', () => {
+        statusEl.textContent = `Connection: ${pc.connectionState}`;
+      });
+
+      pc.addEventListener('icegatheringstatechange', () => {
+        console.log('ICE gathering:', pc.iceGatheringState);
+      });
+
+      // Add mixed audio track to PC
+      destination.stream.getAudioTracks().forEach(track => {
+        pc.addTrack(track, destination.stream);
+      });
+
+      pc.addEventListener('icecandidate', (event) => {
+        if (event.candidate) {
+          socket.emit('ice-candidate', { roomId, candidate: event.candidate });
+        }
+      });
+
+      const socket = io({ transports: ['websocket'] });
+      socket.emit('join-room', roomId);
+
+      socket.on('user-connected', async () => {
+        statusEl.textContent = 'Other user joined. Creating offer...';
+        try {
+          const offer = await pc.createOffer({
+            offerToReceiveAudio: true
+          });
+          await pc.setLocalDescription(offer);
+          console.log('SDP offer:', pc.localDescription.sdp);
+          socket.emit('offer', { roomId, offer: pc.localDescription });
+        } catch (err) {
+          console.error('Offer error:', err);
+        }
+      });
+
+      socket.on('offer', async (offer) => {
+        try {
+          console.log('Received offer SDP:', offer.sdp);
+          await pc.setRemoteDescription(new RTCSessionDescription(offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          console.log('SDP answer:', pc.localDescription.sdp);
+          socket.emit('answer', { roomId, answer: pc.localDescription });
+          statusEl.textContent = 'Offer received. Answered.';
+        } catch (err) {
+          console.error('SDP error:', err);
+        }
+      });
+
+      socket.on('answer', async (answer) => {
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      });
+
+      socket.on('ice-candidate', async (candidate) => {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error('ICE error:', err);
+        }
+      });
+
+      document.getElementById('ttsText').addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          speak();
+          e.target.value = '';
+        }
+      });
+
+      window.speak = async (text = document.getElementById('ttsText').value) => {
+        if (!text || !audioContext) return;
+        try {
+          // Resume AudioContext (required after user gesture)
+          if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+            console.log('AudioContext resumed');
+          }
+          statusEl.textContent = 'Generating TTS...';
+          const url = `/tts?text=${encodeURIComponent(text)}&tl=en&ttsspeed=1.2`;
+          const response = await fetch(url);
+          if (!response.ok) throw new Error('TTS fetch failed');
+          const arrayBuffer = await response.arrayBuffer();
+          const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+          const source = audioContext.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(destination);
+          source.start();
+          // Debug: log sender stats
+          const sender = pc.getSenders().find(s => s.track?.kind === 'audio');
+          if (sender) {
+            console.log('Audio track enabled:', sender.track.enabled, 'readyState:', sender.track.readyState);
+          }
+          statusEl.textContent = 'TTS sent via WebRTC';
+        } catch (err) {
+          console.error('TTS error:', err);
+          statusEl.textContent = `TTS error: ${err.message}`;
+        }
+      };
+
+      socket.on('tts-text', (text) => {
+        speak(text);
+        statusEl.textContent = `TTS via WS: ${text.substring(0, 30)}...`;
+      });
+
+      // Handle autoplay policy - click anywhere to enable audio
+      document.body.addEventListener('click', async () => {
+        if (audioContext?.state === 'suspended') {
+          await audioContext.resume();
+          console.log('AudioContext resumed via click');
+        }
+        if (remoteAudio.paused && remoteAudio.srcObject) {
+          remoteAudio.play().catch(() => {});
+        }
+      }, { once: false });
+
+      statusEl.textContent = 'Connected to signaling. Waiting for peer...';
+    })();
+  </script>
+</body>
+</html>

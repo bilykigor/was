@@ -1,0 +1,34 @@
+{
+  "name": "webrtc-audio-streamer",
+  "version": "1.0.0",
+  "description": "Minimal WebRTC duplex audio streamer with TTS - laptop to phone, low latency, no app required",
+  "main": "server.js",
+  "scripts": {
+    "prestart": "mkdir -p certs && [ ! -f certs/cert.pem ] && openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout certs/private-key.pem -out certs/cert.pem -subj '/CN=localhost' 2>/dev/null || true",
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "webrtc",
+    "audio",
+    "streaming",
+    "duplex",
+    "tts",
+    "text-to-speech",
+    "safari",
+    "real-time"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "socket.io": "^4.8.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
