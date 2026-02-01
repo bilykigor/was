@@ -1,27 +1,36 @@
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const https = require('https');
 const express = require('express');
 const { Server } = require('socket.io');
 
 const app = express();
 
+// HTTPS server with self-signed certs (for local development)
 const certDir = path.join(__dirname, 'certs');
 const privateKey = fs.readFileSync(path.join(certDir, 'private-key.pem'));
 const certificate = fs.readFileSync(path.join(certDir, 'cert.pem'));
 
-const options = {
+const httpsOptions = {
   key: privateKey,
   cert: certificate
 };
 
-const server = https.createServer(options, app);
-const io = new Server(server, {
+const httpsServer = https.createServer(httpsOptions, app);
+
+// HTTP server (for use behind tunnels like ngrok/cloudflare)
+const httpServer = http.createServer(app);
+
+// Socket.IO attached to both servers
+const io = new Server({
   cors: {
     origin: '*',
     methods: ['GET', 'POST']
   }
 });
+io.attach(httpsServer);
+io.attach(httpServer);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -89,9 +98,14 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`WebRTC Audio Streamer server running at https://localhost:${PORT}/audio`);
-  console.log(`Accessible from network at https://YOUR_IP:${PORT}/audio`);
-  console.log('Run npm install && npm start');
+const HTTPS_PORT = 3000;
+const HTTP_PORT = 3001;
+
+httpsServer.listen(HTTPS_PORT, '0.0.0.0', () => {
+  console.log(`HTTPS server running at https://localhost:${HTTPS_PORT}/audio`);
+});
+
+httpServer.listen(HTTP_PORT, '0.0.0.0', () => {
+  console.log(`HTTP server running at http://localhost:${HTTP_PORT}/audio`);
+  console.log(`Use HTTP port ${HTTP_PORT} with ngrok/cloudflare tunnels`);
 });
