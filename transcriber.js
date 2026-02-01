@@ -271,15 +271,19 @@ class Transcriber {
 
   // Check if audio has enough energy (simple VAD)
   hasVoiceActivity(pcmBuffer) {
+    const threshold = config.transcription.vadEnergyThreshold;
+
+    // If threshold is 0, disable VAD (always transcribe)
+    if (threshold === 0) return true;
+
     const samples = new Int16Array(pcmBuffer.buffer, pcmBuffer.byteOffset, pcmBuffer.length / 2);
     let sum = 0;
     for (let i = 0; i < samples.length; i++) {
       sum += Math.abs(samples[i]);
     }
     const avgEnergy = sum / samples.length;
-    console.log(`[Transcriber] Audio energy: ${avgEnergy.toFixed(0)}`);
-    // Threshold for voice activity (lowered from 500)
-    return avgEnergy > 50;
+    console.log(`[Transcriber] Audio energy: ${avgEnergy.toFixed(0)} (threshold: ${threshold})`);
+    return avgEnergy > threshold;
   }
 
   async transcribeWithGroq(audioPath) {

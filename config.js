@@ -13,6 +13,11 @@ module.exports = {
     // Buffer duration in seconds before sending for transcription
     bufferDuration: 5,
 
+    // Voice Activity Detection (VAD) energy threshold
+    // Higher = less sensitive (skips quiet audio), Lower = more sensitive
+    // Set to 0 to disable VAD
+    vadEnergyThreshold: 100,
+
     // Local Whisper settings
     localWhisper: {
       model: 'tiny',  // tiny, base, small, medium, large
