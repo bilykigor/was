@@ -25,7 +25,9 @@
     "url": ""
   },
   "dependencies": {
+    "@roamhq/wrtc": "^0.9.1",
     "express": "^4.19.2",
+    "js-yaml": "^4.1.1",
     "socket.io": "^4.8.0"
   },
   "engines": {

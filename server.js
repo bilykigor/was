@@ -4,6 +4,7 @@ const http = require('http');
 const https = require('https');
 const express = require('express');
 const { Server } = require('socket.io');
+const Transcriber = require('./transcriber');
 
 const app = express();
 
@@ -31,6 +32,9 @@ const io = new Server({
 });
 io.attach(httpsServer);
 io.attach(httpServer);
+
+// Initialize transcriber
+const transcriber = new Transcriber(io);
 
 // Room tracking (persists even when empty)
 const rooms = new Map(); // roomId -> { name, createdAt }
@@ -153,8 +157,34 @@ io.on('connection', (socket) => {
     socket.to(data.roomId).emit('ice-candidate', data.candidate);
   });
 
+  // Transcriber signaling
+  socket.on('transcriber-offer', async (data) => {
+    console.log('[Transcriber] Received offer from', socket.id, 'for room', data.roomId);
+    try {
+      const answer = await transcriber.handleOffer(
+        socket.id,
+        data.offer,
+        data.roomId,
+        data.userId
+      );
+      console.log('[Transcriber] Sending answer to', socket.id);
+      socket.emit('transcriber-answer', answer);
+    } catch (err) {
+      console.error('Transcriber offer error:', err);
+    }
+  });
+
+  socket.on('transcriber-ice-candidate', async (candidate) => {
+    try {
+      await transcriber.handleIceCandidate(socket.id, candidate);
+    } catch (err) {
+      console.error('Transcriber ICE error:', err);
+    }
+  });
+
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
+    transcriber.removePeer(socket.id);
   });
 });
 

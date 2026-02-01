@@ -27,6 +27,11 @@
     #lobby, #room { display: none; }
     #lobby.active, #room.active { display: block; }
     .back-btn { margin-bottom: 20px; }
+    #transcriptions { margin-top: 20px; padding: 10px; background: #f8f9fa; border-radius: 5px; max-height: 200px; overflow-y: auto; }
+    .transcript { margin: 5px 0; padding: 5px; border-left: 3px solid #007bff; padding-left: 10px; }
+    .transcript .user { font-weight: bold; color: #007bff; }
+    .transcript .text { color: #333; }
+    .transcript .time { font-size: 0.8em; color: #6c757d; }
   </style>
 </head>
 <body>
@@ -58,6 +63,10 @@
       <button onclick="speak()">Speak (TTS)</button>
     </div>
     <p><small>Mic: Auto-enabled. TTS uses Google Translate TTS (demo).</small></p>
+    <h3>Transcriptions</h3>
+    <div id="transcriptions">
+      <p style="color: #6c757d;">Waiting for speech...</p>
+    </div>
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
@@ -65,6 +74,7 @@
     let socket;
     let currentRoomId = null;
     let pc;
+    let transcriberPc; // Separate peer connection for transcription
     let localStream;
     let audioContext;
     let micSource;
@@ -138,6 +148,10 @@
         pc.close();
         pc = null;
       }
+      if (transcriberPc) {
+        transcriberPc.close();
+        transcriberPc = null;
+      }
       if (localStream) {
         localStream.getTracks().forEach(t => t.stop());
         localStream = null;
@@ -154,6 +168,7 @@
       document.getElementById('room').classList.remove('active');
       document.getElementById('lobby').classList.add('active');
       document.getElementById('remoteAudio').srcObject = null;
+      document.getElementById('transcriptions').innerHTML = '<p style="color: #6c757d;">Waiting for speech...</p>';
       loadRooms();
     }
 
@@ -264,7 +279,95 @@
         statusEl.textContent = `TTS via WS: ${text.substring(0, 30)}...`;
       });
 
+      // Transcription events
+      socket.on('transcription', (data) => {
+        addTranscription(data.userId, data.text, data.timestamp);
+      });
+
+      // Connect to transcriber
+      await connectToTranscriber(roomId);
+
       statusEl.textContent = 'Connected to signaling. Waiting for peer...';
+    }
+
+    // Connect to server-side transcriber
+    async function connectToTranscriber(roomId) {
+      console.log('[Transcriber] Connecting to transcriber for room:', roomId);
+
+      transcriberPc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      // Send our audio to the transcriber
+      if (localStream) {
+        console.log('[Transcriber] Adding audio tracks:', localStream.getAudioTracks().length);
+        localStream.getAudioTracks().forEach(track => {
+          transcriberPc.addTrack(track, localStream);
+        });
+      } else {
+        console.log('[Transcriber] No localStream available');
+      }
+
+      transcriberPc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('transcriber-ice-candidate', event.candidate);
+        }
+      };
+
+      transcriberPc.onconnectionstatechange = () => {
+        console.log('Transcriber connection:', transcriberPc.connectionState);
+      };
+
+      socket.on('transcriber-ice-candidate', async (candidate) => {
+        try {
+          await transcriberPc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (err) {
+          console.error('Transcriber ICE error:', err);
+        }
+      });
+
+      socket.on('transcriber-answer', async (answer) => {
+        try {
+          await transcriberPc.setRemoteDescription(new RTCSessionDescription(answer));
+          console.log('Transcriber connected');
+        } catch (err) {
+          console.error('Transcriber answer error:', err);
+        }
+      });
+
+      // Create offer and send to server
+      try {
+        console.log('[Transcriber] Creating offer...');
+        const offer = await transcriberPc.createOffer();
+        await transcriberPc.setLocalDescription(offer);
+        console.log('[Transcriber] Sending offer to server');
+        socket.emit('transcriber-offer', {
+          offer: transcriberPc.localDescription,
+          roomId,
+          userId: socket.id
+        });
+      } catch (err) {
+        console.error('Transcriber offer error:', err);
+      }
+    }
+
+    // Add transcription to the display
+    function addTranscription(userId, text, timestamp) {
+      const container = document.getElementById('transcriptions');
+      // Remove "waiting" message if present
+      const waiting = container.querySelector('p');
+      if (waiting) waiting.remove();
+
+      const time = new Date(timestamp).toLocaleTimeString();
+      const div = document.createElement('div');
+      div.className = 'transcript';
+      div.innerHTML = `
+        <span class="user">${userId.substring(0, 8)}:</span>
+        <span class="text">${text}</span>
+        <span class="time">${time}</span>
+      `;
+      container.appendChild(div);
+      container.scrollTop = container.scrollHeight;
     }
 
     // TTS speak function - sends audio via WebRTC to peers
