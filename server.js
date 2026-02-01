@@ -23,7 +23,7 @@ const io = new Server(server, {
   }
 });
 
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/tts', (req, res) => {
   const { text, tl = 'en', ttsspeed = '1' } = req.query;
