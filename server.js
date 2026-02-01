@@ -32,7 +32,55 @@ const io = new Server({
 io.attach(httpsServer);
 io.attach(httpServer);
 
+// Room tracking (persists even when empty)
+const rooms = new Map(); // roomId -> { name, createdAt }
+
+// Ensure default room exists
+rooms.set('default', { name: 'Default Room', createdAt: Date.now() });
+
 app.use(express.static(path.join(__dirname, 'public')));
+
+// API: List all rooms with connected user counts
+app.get('/api/rooms', (req, res) => {
+  const roomList = [];
+  for (const [id, data] of rooms) {
+    const socketsInRoom = io.sockets.adapter.rooms.get(id);
+    roomList.push({
+      id,
+      name: data.name,
+      userCount: socketsInRoom ? socketsInRoom.size : 0,
+      createdAt: data.createdAt
+    });
+  }
+  res.json(roomList);
+});
+
+// API: Create a new room
+app.post('/api/rooms', express.json(), (req, res) => {
+  const { id, name } = req.body;
+  if (!id) {
+    return res.status(400).json({ error: 'Room ID required' });
+  }
+  if (rooms.has(id)) {
+    return res.status(409).json({ error: 'Room already exists' });
+  }
+  rooms.set(id, { name: name || id, createdAt: Date.now() });
+  res.json({ id, name: name || id });
+});
+
+// API: Delete a room (only if empty)
+app.delete('/api/rooms/:id', (req, res) => {
+  const { id } = req.params;
+  if (id === 'default') {
+    return res.status(400).json({ error: 'Cannot delete default room' });
+  }
+  const socketsInRoom = io.sockets.adapter.rooms.get(id);
+  if (socketsInRoom && socketsInRoom.size > 0) {
+    return res.status(400).json({ error: 'Room not empty' });
+  }
+  rooms.delete(id);
+  res.json({ deleted: id });
+});
 
 app.get('/tts', (req, res) => {
   const { text, tl = 'en', ttsspeed = '1' } = req.query;
@@ -75,8 +123,20 @@ io.on('connection', (socket) => {
 
   socket.on('join-room', (roomId) => {
     console.log(`Client ${socket.id} joins room ${roomId}`);
+    // Auto-create room if it doesn't exist
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, { name: roomId, createdAt: Date.now() });
+    }
     socket.join(roomId);
     socket.to(roomId).emit('user-connected');
+    // Notify all clients about room update
+    io.emit('rooms-updated');
+  });
+
+  socket.on('leave-room', (roomId) => {
+    console.log(`Client ${socket.id} leaves room ${roomId}`);
+    socket.leave(roomId);
+    io.emit('rooms-updated');
   });
 
   socket.on('offer', (data) => {
